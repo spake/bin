@@ -1,3 +1,8 @@
+#!/bin/bash
 while true; do
     dwm >/dev/null 2>&1
+    if [ -e "$HOME/.dwm-die" ]; then
+        break
+    fi
 done
+rm $HOME/.dwm-die
