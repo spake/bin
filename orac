@@ -93,9 +93,12 @@ if command == 'test':
         else:
             break
 
-    print
-    print '%d successes, %d failures' % (successes, failures)
-    print 'SCORE: %.0f%%' % (successes/float(successes+failures)*100)
+    if successes+failures == 0:
+        print 'No tests found!'
+    else:
+        print
+        print '%d successes, %d failures' % (successes, failures)
+        print 'SCORE: %.0f%%' % (successes/float(successes+failures)*100)
 
 elif command == 'submit':
     usage_assert(len(sys.argv) >= 5)
