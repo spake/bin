@@ -1,7 +1,11 @@
 #!/usr/bin/env python2.7
 
+# please note: if you are on windows, you don't deserve to use this
+# also it won't work
+
 import os
 import shutil
+import signal
 import sys
 import subprocess
 import time
@@ -9,25 +13,46 @@ import time
 LANGUAGES = ['c', 'c++', 'python']
 DEFAULT_LANGUAGE = 'c++'
 
-TIMEOUT = 10
+SCHEMES = ['in.txt', '.in', 'stdin']
+DEFAULT_SCHEME = 'in.txt'
+
+TIMEOUT = 2
+
+class Alarm(Exception):
+    pass
+
+def alarm_handler(signum, frame):
+    raise Alarm
 
 def usage():
     print 'orac automator'
-    print 'by spake, https://github.com/spake'
+    print 'by george caley, https://github.com/spake'
     print
     print 'usage:'
-    print '%s <command> <command args> [language]' % sys.argv[0]
+    print '%s <command> <command args> <flags>' % sys.argv[0]
     print
     print 'commands:'
-    print 'test <name>: runs unit tests using files named <name>in.n and <name>out.n, n >= 0'
+    print 'test <name>: runs unit tests using cases named <name>in.n and <name>out.n, n >= 0'
     print 'submit <name> <set> <id>: submits a solution to orac'
     print
-    print 'language specifies a language to use for submission and testing. accepted languages are %s' % ', '.join(LANGUAGES)
+    print 'flags:'
+    print '-l: specifies a language to use for submission and testing. accepted languages are %s' % ', '.join(LANGUAGES)
+    print '-t: specifies a testing scheme to use for testing. accepted schemes are %s' % ', '.join(SCHEMES)
     exit(0)
 
 def usage_assert(condition):
     if not condition:
         usage()
+
+def parse_flags(args):
+    accepted = ['-l', '-t']
+    usage_assert(len(args) % 2 == 0)
+    flags = dict()
+    for i in xrange(0, len(args), 2):
+        key, value = args[i], args[i+1]
+        usage_assert(key in accepted)
+        flags[key] = value
+    return flags
 
 usage_assert(len(sys.argv) > 1)
 
@@ -36,10 +61,21 @@ if command == 'test':
     usage_assert(len(sys.argv) >= 3)
 
     if len(sys.argv) >= 4:
-        lang = sys.argv[3]
+        flags = parse_flags(sys.argv[3:])
+    else:
+        flags = list()
+
+    if '-l' in flags:
+        lang = flags['-l']
         usage_assert(lang in LANGUAGES)
     else:
         lang = DEFAULT_LANGUAGE
+
+    if '-t' in flags:
+        scheme = flags['-t']
+        usage_assert(scheme in SCHEMES)
+    else:
+        scheme = DEFAULT_SCHEME
 
     name = sys.argv[2]
 
@@ -49,43 +85,73 @@ if command == 'test':
         compiler = 'gcc' if lang == 'c' else 'g++'
         flags = '-m32 -O2 -lm'
         print '>>> Compiling %s' % source_filename
-        result = subprocess.call("%s %s %s -o %s" % (compiler, flags, source_filename, exec_filename), shell=True)
+        result = subprocess.call('%s %s %s -o %s' % (compiler, flags, source_filename, exec_filename), shell=True)
         if result != 0:
             print
             print 'Error during compilation, testing aborted.'
             exit(1)
         exec_command = './%s' % exec_filename
     elif lang == 'python':
-        exec_command = 'python %s.py' % name
+        source_filename = '%s.py' % name
+        if not os.path.exists(source_filename):
+            print '%s doesn\'t exist, testing aborted.' % source_filename
+            exit(1)
+        exec_command = 'python %s' % source_filename
 
     print '>>> Running tests'
 
     n = 0
     successes = 0
     failures = 0
-    exec_in = '%sin.txt' % name
-    exec_out = '%sout.txt' % name
+    if scheme == 'in.txt' or scheme == 'stdin':
+        exec_in = '%sin.txt' % name
+        exec_out = '%sout.txt' % name
+    elif scheme == '.in':
+        exec_in = '%s.in' % name
+        exec_out = '%s.out' % name
     while True:
         in_file = '%sin.%d' % (name, n)
         out_file = '%sout.%d' % (name, n)
 
         if os.path.exists(in_file) and os.path.exists(out_file):
-            shutil.copyfile(in_file, exec_in)
-            start_time = time.time()
-            result = subprocess.call(exec_command, shell=True)
-            running_time = time.time() - start_time
-            if result != 0:
-                status = 'crashed'
+            if scheme == 'in.txt' or scheme == '.in':
+                shutil.copyfile(in_file, exec_in)
+                command = exec_command
+            elif scheme == 'stdin':
+                command = '%s < %s > %s' % (exec_command, in_file, exec_out)
+            proc = subprocess.Popen(command, shell=True)
+            signal.signal(signal.SIGALRM, alarm_handler)
+            signal.alarm(TIMEOUT)
+            try:
+                start_time = time.time()
+                #_, _ = proc.communicate()
+                proc.wait()
+                running_time = time.time() - start_time
+                signal.alarm(0)
+            except KeyboardInterrupt:
+                running_time = time.time() - start_time
+                proc.kill()
+                status = 'aborted'
+                failures += 1
+            except Alarm:
+                running_time = TIMEOUT
+                proc.kill()
+                status = 'timeout'
                 failures += 1
             else:
-                exec_contents = open(exec_out, "r").read().strip()
-                out_contents = open(out_file, "r").read().strip()
-                if exec_contents == out_contents:
-                    status = 'correct'
-                    successes += 1
-                else:
-                    status = 'incorrect'
+                result = proc.poll()
+                if result != 0:
+                    status = 'crashed'
                     failures += 1
+                else:
+                    exec_contents = open(exec_out, 'r').read().strip()
+                    out_contents = open(out_file, 'r').read().strip()
+                    if exec_contents == out_contents:
+                        status = 'correct'
+                        successes += 1
+                    else:
+                        status = 'incorrect'
+                        failures += 1
 
             print '#%d: %s (%.3fs)' % (n, status, running_time)
 
