@@ -3,20 +3,76 @@
 # please note: if you are on windows, you don't deserve to use this
 # also it won't work
 
+import getpass
+import httplib
 import os
+import re
 import shutil
 import signal
 import sys
 import subprocess
 import time
+import urllib
 
-LANGUAGES = ['c', 'c++', 'python']
-DEFAULT_LANGUAGE = 'c++'
+LANGUAGES = ['c', 'cpp', 'py']
+DEFAULT_LANGUAGE = 'cpp'
 
 SCHEMES = ['in.txt', '.in', 'stdin']
 DEFAULT_SCHEME = 'in.txt'
 
 TIMEOUT = 2
+
+COOKIE_PATH = os.path.expanduser('~/.orac_cookie')
+
+def get_cookie():
+    if os.path.exists(COOKIE_PATH):
+        return open(COOKIE_PATH, "r").read().strip()
+    return None
+
+def set_cookie(cookie):
+    f = open(COOKIE_PATH, "w")
+    f.write(cookie)
+    f.close()
+
+def login():
+    try:
+        username = raw_input('Username: ')
+        password = getpass.getpass()
+    except KeyboardInterrupt:
+        print
+        return False
+
+    if not (len(username) and len(password)):
+        print 'Please enter both a username and a password, or ^C to abort.'
+        print
+        return login()
+
+    params = {'login_username': username, 'login_password': password, 'login_submit': 'Log in'}
+
+    conn = httplib.HTTPConnection('orac.amt.edu.au')
+    conn.request('POST', '/cgi-bin/train/index.pl', urllib.urlencode(params))
+    res = conn.getresponse()
+    if res.status == 302:
+        # extract cookies
+        cookie_header = res.getheader('set-cookie')
+        cookie = '; '.join(re.findall('(aioc_.*?=.*?);', cookie_header))
+        set_cookie(cookie)
+        result = True
+    else:
+        result = False
+    conn.close()
+    return result
+
+def check_cookie():
+    cookie = get_cookie()
+    if not cookie:
+        return False
+    conn = httplib.HTTPConnection('orac.amt.edu.au')
+    conn.request('GET', '/cgi-bin/train/hub.pl', '', {'Cookie': cookie})
+    res = conn.getresponse()
+    result = res.status == 200
+    conn.close()
+    return result
 
 class Alarm(Exception):
     pass
@@ -79,7 +135,7 @@ if command == 'test':
 
     name = sys.argv[2]
 
-    if lang == 'c' or lang == 'c++':
+    if lang == 'c' or lang == 'cpp':
         source_filename = '%s.%s' % (name, 'c' if lang == 'c' else 'cpp')
         exec_filename = '%s.o' % name
         compiler = 'gcc' if lang == 'c' else 'g++'
@@ -91,7 +147,7 @@ if command == 'test':
             print 'Error during compilation, testing aborted.'
             exit(1)
         exec_command = './%s' % exec_filename
-    elif lang == 'python':
+    elif lang == 'py':
         source_filename = '%s.py' % name
         if not os.path.exists(source_filename):
             print '%s doesn\'t exist, testing aborted.' % source_filename
@@ -171,6 +227,84 @@ elif command == 'submit':
 
     name, problem_set, problem_id = sys.argv[2:5]
 
-    print 'submit not yet implemented. soz4lyf'
+    if len(sys.argv) >= 6:
+        flags = parse_flags(sys.argv[5:])
+    else:
+        flags = list()
+
+    if '-l' in flags:
+        lang = flags['-l']
+        usage_assert(lang in LANGUAGES)
+    else:
+        lang = DEFAULT_LANGUAGE
+
+    if lang == 'c':
+        filename = '%s.c' % name
+    elif lang == 'cpp':
+        filename = '%s.cpp' % name
+    elif lang == 'py':
+        filename = '%s.py' % name
+
+    if not os.path.exists(filename):
+        print '%s does not exist, aborting.' % filename
+        exit(1)
+
+    cookie = get_cookie()
+    if not cookie or not check_cookie():
+        if not login():
+            exit(1)
+        cookie = get_cookie()
+
+    print 'Logged in successfully.'
+    data = open(filename, "r").read()
+    print 'Submitting %s, %d bytes' % (filename, len(data))
+
+    fields = {'problemid': problem_id, 'lang': lang, '.submit': 'Submit', 'set': problem_set}
+
+    BOUNDARY = '---------070bff8a9e240b11ee6b41e7d92b41ba'
+
+    lines = list()
+    for key, value in fields.items():
+        lines.append('--' + BOUNDARY)
+        lines.append('Content-Disposition: form-data; name="%s"' % key)
+        lines.append('')
+        lines.append(value)
+    lines.append('--' + BOUNDARY)
+    lines.append('Content-Disposition: form-data; name="submitted_file"; filename="%s"' % filename)
+    lines.append('Content-Type: text/plain')
+    lines.append('')
+    lines.append(data)
+    lines.append('--' + BOUNDARY + '--')
+    lines.append('')
+
+    body = '\r\n'.join(lines)
+
+    headers = {'Cookie': cookie, 'Content-Type': 'multipart/form-data; boundary=%s' % BOUNDARY}
+
+    print
+    print '>>> Sending request'
+    conn = httplib.HTTPConnection('orac.amt.edu.au')
+    conn.request('POST', '/cgi-bin/train/submission.pl', body, headers)
+    res = conn.getresponse()
+    if res.status == 200:
+        print '>>> Waiting for response'
+        response = ''
+        while not response.endswith('</html>'):
+            chunk = res.read().replace('\r', '').replace('\n', '')
+            if len(chunk):
+                response += chunk
+        print '>>> Done'
+        match = re.search('<pre>JUDGE<br>(.*?)</pre>', response)
+        if match:
+            print match.group(1).replace('<br>', '\n')
+        else:
+            print 'No testing results found in response.'
+            print 'Dumping response to debug.txt'
+            f = open('debug.txt', 'w')
+            f.write(response)
+            f.close()
+    else:
+        print 'Error: HTTP %d during submission' % res.status
+    conn.close()
 else:
     usage()
