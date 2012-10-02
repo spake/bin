@@ -18,11 +18,41 @@ LANGUAGES = ['c', 'cpp', 'py']
 DEFAULT_LANGUAGE = 'cpp'
 
 SCHEMES = ['in.txt', '.in', 'stdin']
-DEFAULT_SCHEME = 'in.txt'
 
 TIMEOUT = 2
 
 COOKIE_PATH = os.path.expanduser('~/.orac_cookie')
+
+def language_file_extension(lang):
+    # at this point in time, all extension are the same as the language itself
+    return lang
+
+def language_desc(lang):
+    if lang == 'c':
+        return 'C'
+    elif lang == 'cpp':
+        return 'C++'
+    elif lang == 'py':
+        return 'Python'
+
+def guess_language(name):
+    for lang in LANGUAGES:
+        filename = '%s.%s' % (name, lang)
+        if os.path.exists(filename):
+            print '>>> Setting language to %s' % language_desc(lang)
+            return lang
+    lang = DEFAULT_LANGUAGE
+    print ">>> Couldn't guess language, defaulting to %s" % language_desc(lang)
+    return lang
+
+def guess_scheme(name):
+    for scheme in SCHEMES:
+        if scheme != 'stdin' and os.path.exists('%s%s' % (name, scheme)):
+            print '>>> Setting input scheme to %s' % scheme
+            return scheme
+    scheme = 'stdin'
+    print ">>> Couldn't find any input files, defaulting to %s" % scheme
+    return scheme
 
 def get_cookie():
     if os.path.exists(COOKIE_PATH):
@@ -89,7 +119,7 @@ def usage():
     print
     print 'commands:'
     print 'test <name>: runs unit tests using cases named <name>in.n and <name>out.n, n >= 0'
-    print 'submit <name> <set> <id>: submits a solution to orac'
+    print 'submit <name> <id>: submits a solution to orac'
     print
     print 'flags:'
     print '-l: specifies a language to use for submission and testing. accepted languages are %s' % ', '.join(LANGUAGES)
@@ -116,6 +146,8 @@ command = sys.argv[1]
 if command == 'test':
     usage_assert(len(sys.argv) >= 3)
 
+    name = sys.argv[2]
+
     if len(sys.argv) >= 4:
         flags = parse_flags(sys.argv[3:])
     else:
@@ -125,15 +157,13 @@ if command == 'test':
         lang = flags['-l']
         usage_assert(lang in LANGUAGES)
     else:
-        lang = DEFAULT_LANGUAGE
+        lang = guess_language(name)
 
     if '-t' in flags:
         scheme = flags['-t']
         usage_assert(scheme in SCHEMES)
     else:
-        scheme = DEFAULT_SCHEME
-
-    name = sys.argv[2]
+        scheme = guess_scheme(name)
 
     if lang == 'c' or lang == 'cpp':
         source_filename = '%s.%s' % (name, 'c' if lang == 'c' else 'cpp')
@@ -155,6 +185,7 @@ if command == 'test':
         exec_command = 'python %s' % source_filename
 
     print '>>> Running tests'
+    print
 
     n = 0
     successes = 0
@@ -223,12 +254,12 @@ if command == 'test':
         print 'SCORE: %.0f%%' % (successes/float(successes+failures)*100)
 
 elif command == 'submit':
-    usage_assert(len(sys.argv) >= 5)
+    usage_assert(len(sys.argv) >= 4)
 
-    name, problem_set, problem_id = sys.argv[2:5]
+    name, problem_id = sys.argv[2:4]
 
-    if len(sys.argv) >= 6:
-        flags = parse_flags(sys.argv[5:])
+    if len(sys.argv) >= 5:
+        flags = parse_flags(sys.argv[4:])
     else:
         flags = list()
 
@@ -236,18 +267,14 @@ elif command == 'submit':
         lang = flags['-l']
         usage_assert(lang in LANGUAGES)
     else:
-        lang = DEFAULT_LANGUAGE
+        lang = guess_language(name)
 
-    if lang == 'c':
-        filename = '%s.c' % name
-    elif lang == 'cpp':
-        filename = '%s.cpp' % name
-    elif lang == 'py':
-        filename = '%s.py' % name
-
+    filename = '%s.%s' % (name, language_file_extension(lang))
     if not os.path.exists(filename):
         print '%s does not exist, aborting.' % filename
         exit(1)
+
+    print '>>> Authenticating with orac'
 
     cookie = get_cookie()
     if not cookie or not check_cookie():
@@ -255,9 +282,37 @@ elif command == 'submit':
             exit(1)
         cookie = get_cookie()
 
-    print 'Logged in successfully.'
+    print 'Authenticated successfully.'
+    print
+
+    print '>>> Finding a set that contains problem %s' % problem_id
+
+    conn = httplib.HTTPConnection('orac.amt.edu.au')
+    conn.request('GET', '/cgi-bin/train/hub.pl?expand=all', None, {'Cookie': cookie})
+    res = conn.getresponse()
+    success = True
+    if res.status == 200:
+        sets = dict([(b, (a, c)) for a, b, c in re.findall(r'/cgi-bin/train/problem\.pl\?set=(.*?)&problemid=(.*?)">(.*?)</a>', res.read().replace('\n', ''), re.I)])
+        if problem_id not in sets:
+            print "Couldn't find the problem. Are you sure you typed the ID correctly?"
+            success = False
+        else:
+            problem_set, problem_name = sets[problem_id]
+            print 'Found the problem in %s' % problem_set
+    else:
+        print 'HTTP %d while retrieving the list of problems.' % res.status
+        success = False
+    if not success:
+        exit(1)
+
+    # quickly format the problem name nicely using hax
+    problem_name = __import__('HTMLParser').HTMLParser().unescape(problem_name)
+
+    print
+    print 'Submitting solution to %s' % problem_name
+
     data = open(filename, "r").read()
-    print 'Submitting %s, %d bytes' % (filename, len(data))
+    print '%s, %d bytes' % (filename, len(data))
 
     fields = {'problemid': problem_id, 'lang': lang, '.submit': 'Submit', 'set': problem_set}
 
@@ -293,10 +348,11 @@ elif command == 'submit':
             chunk = res.read().replace('\r', '').replace('\n', '')
             if len(chunk):
                 response += chunk
-        print '>>> Done'
         match = re.search('<pre>JUDGE<br>(.*?)</pre>', response)
         if match:
-            print match.group(1).replace('<br>', '\n')
+            print
+            print match.group(1).replace('<br>', '\n').rstrip()
+            print
         else:
             print 'No testing results found in response.'
             print 'Dumping response to debug.txt'
