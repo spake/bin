@@ -5,4 +5,4 @@ while true; do
         break
     fi
 done
-rm $HOME/.dwm-die
+rm -f $HOME/.dwm-die
