@@ -1,0 +1,6 @@
+#!/bin/sh
+if [ -z "$1" ]; then
+    echo "usage: $0 <regex>"
+else
+    ps aux | grep -E -s "$1"
+fi
